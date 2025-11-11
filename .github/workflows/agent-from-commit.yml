@@ -1,0 +1,84 @@
+name: Agent from Commit Message
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      objective:
+        description: "Prompt manual (si es deixa buit, s'usa el missatge del darrer commit)"
+        required: false
+      repo:
+        description: "Repo objectiu owner/name (per defecte aquest)"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ALLOWED_TOOLS: search_issues,get_file,create_pull_request
+      OPENAI_MODEL: gpt-4o-mini
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Auth GitHub CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_TOKEN" | gh auth login --with-token
+
+      - name: Build objective from commit or dispatch input
+        id: prep
+        shell: bash
+        env:
+          INPUT_OBJECTIVE: ${{ github.event.inputs.objective }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          OBJ="${INPUT_OBJECTIVE:-$COMMIT_MSG}"
+          OBJ="${OBJ//$'\n'/ }"
+          OBJ="${OBJ//$'\r'/ }"
+          OBJ="${OBJ//\"/\\\"}"
+          echo "objective=$OBJ" >> "$GITHUB_OUTPUT"
+
+          CONFIRM_FLAG=""
+          shopt -s nocasematch
+          if [[ "$OBJ" =~ (CONFIRM_PR|#confirm-pr) ]]; then
+            CONFIRM_FLAG="--confirm-pr"
+          fi
+          echo "confirm=$CONFIRM_FLAG" >> "$GITHUB_OUTPUT"
+
+          REPO_IN="${{ github.event.inputs.repo }}"
+          REPO_USE="${REPO_IN:-${{ github.repository }}}"
+          echo "repo=$REPO_USE" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent (LangChain + OpenAI Functions)
+        id: runagent
+        shell: bash
+        run: |
+          set -e
+          mkdir -p artifacts
+          python -m src.run             --objective "${{ steps.prep.outputs.objective }}"             --repo "${{ steps.prep.outputs.repo }}"             ${{ steps.prep.outputs.confirm }} | tee artifacts/agent_result.json
+
+      - name: Upload result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-result
+          path: artifacts/agent_result.json
